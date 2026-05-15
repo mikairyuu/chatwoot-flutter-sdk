@@ -82,9 +82,7 @@ String generateScripts({
       }
 
       sendChatwootMessages();
-      setTimeout(sendChatwootMessages, 300);
-      setTimeout(sendChatwootMessages, 1000);
-      setTimeout(sendChatwootMessages, 2000);
+      setTimeout(sendChatwootMessages, 500);
     })();
   ''';
 }

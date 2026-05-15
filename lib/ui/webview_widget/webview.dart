@@ -66,6 +66,7 @@ class Webview extends StatefulWidget {
 
 class _WebviewState extends State<Webview> {
   WebViewController? _controller;
+  bool _didInjectChatwootUser = false;
   late final WebViewController controller;
   @override
   void initState() {
@@ -95,18 +96,6 @@ class _WebviewState extends State<Webview> {
             },
             onPageFinished: (String url) async {
               widget.onLoadCompleted?.call();
-
-              Future.delayed(const Duration(milliseconds: 300), () {
-                if (mounted) {
-                  controller.runJavaScript(widget.injectedJavaScript);
-                }
-              });
-
-              Future.delayed(const Duration(milliseconds: 1000), () {
-                if (mounted) {
-                  controller.runJavaScript(widget.injectedJavaScript);
-                }
-              });
             },
             onWebResourceError: (WebResourceError error) {},
             onNavigationRequest: (NavigationRequest request) {
@@ -155,7 +144,10 @@ class _WebviewState extends State<Webview> {
                   StoreHelper.storeCookie(authToken);
                 }
 
-                controller.runJavaScript(widget.injectedJavaScript);
+                if (!_didInjectChatwootUser) {
+                  _didInjectChatwootUser = true;
+                  controller.runJavaScript(widget.injectedJavaScript);
+                }
               }
 
               if (type == 'close-widget') {
