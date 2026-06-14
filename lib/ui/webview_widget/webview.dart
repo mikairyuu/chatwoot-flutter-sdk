@@ -15,6 +15,8 @@ import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart'
 /// {@category FlutterClientSdk}
 class Webview extends StatefulWidget {
   final String baseUrl;
+  final String websiteToken;
+  final String? userIdentifier;
 
   /// Url for Chatwoot widget in webview
   late final String widgetUrl;
@@ -39,7 +41,7 @@ class Webview extends StatefulWidget {
 
   Webview({
     Key? key,
-    required String websiteToken,
+    required this.websiteToken,
     required this.baseUrl,
     ChatwootUser? user,
     String locale = "en",
@@ -49,9 +51,10 @@ class Webview extends StatefulWidget {
     this.onLoadStarted,
     this.onLoadProgress,
     this.onLoadCompleted,
-  }) : super(key: key) {
+  })  : userIdentifier = user?.identifier,
+        super(key: key) {
     widgetUrl =
-        "${baseUrl}/widget?website_token=${websiteToken}&locale=${locale}";
+        "$baseUrl/widget?website_token=$websiteToken&locale=$locale";
 
     injectedJavaScript = generateScripts(
       user: user,
@@ -66,8 +69,8 @@ class Webview extends StatefulWidget {
 
 class _WebviewState extends State<Webview> {
   WebViewController? _controller;
-  bool _didInjectChatwootUser = false;
   late final WebViewController controller;
+
   @override
   void initState() {
     super.initState();
@@ -75,7 +78,19 @@ class _WebviewState extends State<Webview> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       String webviewUrl = widget.widgetUrl;
 
-      final cwCookie = await StoreHelper.getCookie();
+      // Old SDK versions stored one global cwCookie.
+      // On iOS Keychain it may survive reinstall and poison the widget session.
+      try {
+        await StoreHelper.deleteLegacyCookie();
+      } catch (e, st) {
+        debugPrint('Chatwoot legacy cookie delete failed: $e\n$st');
+      }
+
+      final cwCookie = await StoreHelper.getCookie(
+        baseUrl: widget.baseUrl,
+        websiteToken: widget.websiteToken,
+        userIdentifier: widget.userIdentifier,
+      );
 
       if (!mounted) return;
 
@@ -97,7 +112,16 @@ class _WebviewState extends State<Webview> {
             onPageFinished: (String url) async {
               widget.onLoadCompleted?.call();
             },
-            onWebResourceError: (WebResourceError error) {},
+            onWebResourceError: (WebResourceError error) {
+              debugPrint(
+                'Chatwoot WebResourceError: '
+                'code=${error.errorCode}, '
+                'type=${error.errorType}, '
+                'description=${error.description}, '
+                'url=${error.url}, '
+                'isForMainFrame=${error.isForMainFrame}',
+              );
+            },
             onNavigationRequest: (NavigationRequest request) {
               final uri = Uri.tryParse(request.url);
 
@@ -127,8 +151,8 @@ class _WebviewState extends State<Webview> {
         )
         ..addJavaScriptChannel(
           "ReactNativeWebView",
-          onMessageReceived: (JavaScriptMessage jsMessage) {
-            print("Chatwoot message received: ${jsMessage.message}");
+          onMessageReceived: (JavaScriptMessage jsMessage) async {
+            debugPrint("Chatwoot message received: ${jsMessage.message}");
 
             final message = getMessage(jsMessage.message);
 
@@ -140,14 +164,20 @@ class _WebviewState extends State<Webview> {
               if (eventType == 'loaded') {
                 final authToken = parsedMessage["config"]?["authToken"];
 
-                if (authToken != null) {
-                  StoreHelper.storeCookie(authToken);
+                if (authToken is String && authToken.isNotEmpty) {
+                  try {
+                    await StoreHelper.storeCookie(
+                      authToken,
+                      baseUrl: widget.baseUrl,
+                      websiteToken: widget.websiteToken,
+                      userIdentifier: widget.userIdentifier,
+                    );
+                  } catch (e, st) {
+                    debugPrint('Chatwoot cookie save failed: $e\n$st');
+                  }
                 }
 
-                if (!_didInjectChatwootUser) {
-                  _didInjectChatwootUser = true;
-                  controller.runJavaScript(widget.injectedJavaScript);
-                }
+                await controller.runJavaScript(widget.injectedJavaScript);
               }
 
               if (type == 'close-widget') {

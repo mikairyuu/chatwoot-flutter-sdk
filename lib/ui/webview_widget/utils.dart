@@ -89,15 +89,60 @@ String generateScripts({
 
 const _androidOptions = AndroidOptions(encryptedSharedPreferences: true);
 final secureStorage = new FlutterSecureStorage(aOptions: _androidOptions);
-const cookieKey = 'cwCookie';
+
+const legacyCookieKey = 'cwCookie';
 
 class StoreHelper {
-  static Future<String> getCookie() async {
-    final cookie = await secureStorage.read(key: cookieKey);
+  static String _scopedCookieKey({
+    required String baseUrl,
+    required String websiteToken,
+    String? userIdentifier,
+  }) {
+    final normalizedBaseUrl = baseUrl.replaceAll(RegExp(r'/$'), '');
+    final userKey =
+        userIdentifier != null && userIdentifier.isNotEmpty
+            ? userIdentifier
+            : 'anonymous';
+
+    return 'cwCookie:'
+        '${Uri.encodeComponent(normalizedBaseUrl)}:'
+        '${Uri.encodeComponent(websiteToken)}:'
+        '${Uri.encodeComponent(userKey)}';
+  }
+
+  static Future<String> getCookie({
+    required String baseUrl,
+    required String websiteToken,
+    String? userIdentifier,
+  }) async {
+    final cookie = await secureStorage.read(
+      key: _scopedCookieKey(
+        baseUrl: baseUrl,
+        websiteToken: websiteToken,
+        userIdentifier: userIdentifier,
+      ),
+    );
+
     return cookie ?? "";
   }
 
-  static storeCookie(value) async {
-    await secureStorage.write(key: cookieKey, value: value);
+  static Future<void> storeCookie(
+    String value, {
+    required String baseUrl,
+    required String websiteToken,
+    String? userIdentifier,
+  }) async {
+    await secureStorage.write(
+      key: _scopedCookieKey(
+        baseUrl: baseUrl,
+        websiteToken: websiteToken,
+        userIdentifier: userIdentifier,
+      ),
+      value: value,
+    );
+  }
+
+  static Future<void> deleteLegacyCookie() async {
+    await secureStorage.delete(key: legacyCookieKey);
   }
 }
