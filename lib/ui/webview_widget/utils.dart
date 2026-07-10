@@ -37,19 +37,51 @@ String getMessage(String data) {
   return data.replaceAll(WOOT_PREFIX, '');
 }
 
+dynamic _mergeCustomAttributes(
+  dynamic userAttributes,
+  dynamic widgetAttributes,
+) {
+  if (userAttributes is Map && widgetAttributes is Map) {
+    return <String, dynamic>{
+      ...userAttributes.map((key, value) => MapEntry(key.toString(), value)),
+      ...widgetAttributes.map((key, value) => MapEntry(key.toString(), value)),
+    };
+  }
+
+  return widgetAttributes ?? userAttributes;
+}
+
 String generateScripts({
   ChatwootUser? user,
   String? locale,
   dynamic customAttributes,
 }) {
   final messages = <Map<String, dynamic>>[];
+  final identifiedUser =
+      user != null && user.identifier != null && user.identifier!.isNotEmpty
+      ? user
+      : null;
 
-  if (user != null && user.identifier != null && user.identifier!.isNotEmpty) {
-    final userJson = cleanJson(Map<String, dynamic>.from(user.toJson()));
+  if (identifiedUser != null) {
+    final mergedCustomAttributes = _mergeCustomAttributes(
+      identifiedUser.customAttributes,
+      customAttributes,
+    );
+
+    // Chatwoot setUser(identifier, user): identifier is top-level, while the
+    // profile and custom attributes are sent inside the `user` object.
+    final userJson = cleanJson({
+      "email": identifiedUser.email,
+      "name": identifiedUser.name,
+      "phone_number": identifiedUser.phone_number,
+      "avatar_url": identifiedUser.avatarUrl,
+      "identifier_hash": identifiedUser.identifierHash,
+      "custom_attributes": mergedCustomAttributes,
+    });
 
     messages.add({
       "event": PostMessageEvents.SET_USER,
-      "identifier": user.identifier,
+      "identifier": identifiedUser.identifier,
       "user": userJson,
     });
   }
@@ -58,31 +90,102 @@ String generateScripts({
     messages.add({"event": PostMessageEvents.SET_LOCALE, "locale": locale});
   }
 
-  if (customAttributes != null) {
+  // For identified users custom attributes go through the same set-user request.
+  // Sending a second request concurrently can update the old anonymous contact
+  // when set-user switches the widget to another contact/auth token.
+  if (identifiedUser == null && customAttributes != null) {
     messages.add({
       "event": PostMessageEvents.SET_CUSTOM_ATTRIBUTES,
       "customAttributes": customAttributes,
     });
   }
 
-  final payloads = messages.map((m) => '$WOOT_PREFIX${jsonEncode(m)}').toList();
+  final payloads = messages
+      .map((message) => '$WOOT_PREFIX${jsonEncode(message)}')
+      .toList();
+
+  final prefix = jsonEncode(WOOT_PREFIX);
 
   return '''
     (function () {
-      const messages = ${jsonEncode(payloads)};
+      const prefix = $prefix;
 
-      function sendChatwootMessages() {
-        messages.forEach(function (message) {
+      function sendToFlutter(message) {
+        if (
+          window.ReactNativeWebView &&
+          typeof window.ReactNativeWebView.postMessage === 'function'
+        ) {
+          window.ReactNativeWebView.postMessage(
+            prefix + JSON.stringify(message)
+          );
+        }
+      }
+
+      // Chatwoot sends setAuthCookie/error through window.parent.postMessage.
+      // In a top-level Flutter WebView parent === window, so forward those
+      // events to the JavaScriptChannel too.
+      if (!window.__chatwootFlutterBridgeInstalled) {
+        window.__chatwootFlutterBridgeInstalled = true;
+
+        window.addEventListener('message', function (event) {
           try {
-            window.postMessage(message, '*');
-          } catch (e) {
-            console.error('Chatwoot postMessage failed', e);
+            const rawMessage = event.data;
+
+            if (
+              typeof rawMessage !== 'string' ||
+              rawMessage.indexOf(prefix) !== 0
+            ) {
+              return;
+            }
+
+            const parsedMessage = JSON.parse(
+              rawMessage.substring(prefix.length)
+            );
+
+            if (parsedMessage.event === 'setAuthCookie') {
+              const widgetAuthToken =
+                parsedMessage.data && parsedMessage.data.widgetAuthToken;
+
+              if (widgetAuthToken) {
+                sendToFlutter({
+                  event: 'auth-token-updated',
+                  config: {
+                    authToken: widgetAuthToken
+                  }
+                });
+              }
+            } else if (parsedMessage.event === 'error') {
+              sendToFlutter({
+                event: 'chatwoot-error',
+                errorType: parsedMessage.errorType,
+                data: parsedMessage.data
+              });
+            }
+          } catch (error) {
+            console.error(
+              'Chatwoot Flutter message bridge failed',
+              error
+            );
           }
         });
       }
 
-      sendChatwootMessages();
-      setTimeout(sendChatwootMessages, 500);
+      const messages = ${jsonEncode(payloads)};
+
+      // De-duplicate only in this document. After an auth-token navigation the
+      // page has a fresh JS context and must receive identity/configuration again.
+      if (!window.__chatwootFlutterConfigurationApplied) {
+        window.__chatwootFlutterConfigurationApplied = true;
+
+        messages.forEach(function (message) {
+          try {
+            window.postMessage(message, '*');
+          } catch (error) {
+            console.error('Chatwoot postMessage failed', error);
+          }
+        });
+      }
+
     })();
   ''';
 }
@@ -99,10 +202,9 @@ class StoreHelper {
     String? userIdentifier,
   }) {
     final normalizedBaseUrl = baseUrl.replaceAll(RegExp(r'/$'), '');
-    final userKey =
-        userIdentifier != null && userIdentifier.isNotEmpty
-            ? userIdentifier
-            : 'anonymous';
+    final userKey = userIdentifier != null && userIdentifier.isNotEmpty
+        ? userIdentifier
+        : 'anonymous';
 
     return 'cwCookie:'
         '${Uri.encodeComponent(normalizedBaseUrl)}:'

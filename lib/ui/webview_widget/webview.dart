@@ -51,10 +51,9 @@ class Webview extends StatefulWidget {
     this.onLoadStarted,
     this.onLoadProgress,
     this.onLoadCompleted,
-  })  : userIdentifier = user?.identifier,
-        super(key: key) {
-    widgetUrl =
-        "$baseUrl/widget?website_token=$websiteToken&locale=$locale";
+  }) : userIdentifier = user?.identifier,
+       super(key: key) {
+    widgetUrl = "$baseUrl/widget?website_token=$websiteToken&locale=$locale";
 
     injectedJavaScript = generateScripts(
       user: user,
@@ -70,6 +69,10 @@ class Webview extends StatefulWidget {
 class _WebviewState extends State<Webview> {
   WebViewController? _controller;
   late final WebViewController controller;
+
+  String? _pageAuthToken;
+  String? _lastReloadedAuthToken;
+  bool _identityReloadInProgress = false;
 
   @override
   void initState() {
@@ -95,7 +98,7 @@ class _WebviewState extends State<Webview> {
       if (!mounted) return;
 
       if (cwCookie.isNotEmpty) {
-        webviewUrl = "$webviewUrl&cw_conversation=$cwCookie";
+        webviewUrl = _widgetUriWithToken(cwCookie).toString();
       }
 
       controller = WebViewController()
@@ -152,8 +155,6 @@ class _WebviewState extends State<Webview> {
         ..addJavaScriptChannel(
           "ReactNativeWebView",
           onMessageReceived: (JavaScriptMessage jsMessage) async {
-            debugPrint("Chatwoot message received: ${jsMessage.message}");
-
             final message = getMessage(jsMessage.message);
 
             if (isJsonString(message)) {
@@ -165,19 +166,64 @@ class _WebviewState extends State<Webview> {
                 final authToken = parsedMessage["config"]?["authToken"];
 
                 if (authToken is String && authToken.isNotEmpty) {
-                  try {
-                    await StoreHelper.storeCookie(
-                      authToken,
-                      baseUrl: widget.baseUrl,
-                      websiteToken: widget.websiteToken,
-                      userIdentifier: widget.userIdentifier,
-                    );
-                  } catch (e, st) {
-                    debugPrint('Chatwoot cookie save failed: $e\n$st');
-                  }
+                  _pageAuthToken = authToken;
+                  await _storeAuthToken(authToken);
                 }
 
-                await controller.runJavaScript(widget.injectedJavaScript);
+                _identityReloadInProgress = false;
+
+                // Apply configuration for every loaded document. The injected
+                // script de-duplicates inside one page, while a token reload gets
+                // a fresh JS context and must receive identity again.
+                try {
+                  await controller.runJavaScript(widget.injectedJavaScript);
+                } catch (error, stackTrace) {
+                  debugPrint(
+                    'Chatwoot configuration injection failed: '
+                    '$error\n$stackTrace',
+                  );
+                }
+              }
+
+              if (eventType == 'auth-token-updated') {
+                final authToken = parsedMessage["config"]?["authToken"];
+
+                if (authToken is String && authToken.isNotEmpty) {
+                  await _storeAuthToken(authToken);
+
+                  final tokenChanged = authToken != _pageAuthToken;
+                  final alreadyReloaded = authToken == _lastReloadedAuthToken;
+
+                  if (tokenChanged &&
+                      !alreadyReloaded &&
+                      !_identityReloadInProgress) {
+                    _identityReloadInProgress = true;
+                    _lastReloadedAuthToken = authToken;
+                    _pageAuthToken = authToken;
+
+                    // set-user can switch/merge the widget contact. Reload with
+                    // the final cw_conversation token so ActionCable subscribes
+                    // using the pubsub token of the actual identified contact.
+                    try {
+                      await controller.loadRequest(
+                        _widgetUriWithToken(authToken),
+                      );
+                    } catch (error) {
+                      _identityReloadInProgress = false;
+                      rethrow;
+                    }
+
+                    return;
+                  }
+                }
+              }
+
+              if (eventType == 'chatwoot-error') {
+                debugPrint(
+                  'Chatwoot widget error: '
+                  'type=${parsedMessage["errorType"]}, '
+                  'data=${parsedMessage["data"]}',
+                );
               }
 
               if (type == 'close-widget') {
@@ -226,5 +272,30 @@ class _WebviewState extends State<Webview> {
     return _controller != null
         ? WebViewWidget(controller: _controller!)
         : SizedBox();
+  }
+
+  Uri _widgetUriWithToken(String authToken) {
+    final uri = Uri.parse(widget.widgetUrl);
+
+    return uri.replace(
+      queryParameters: {...uri.queryParameters, 'cw_conversation': authToken},
+    );
+  }
+
+  Future<void> _storeAuthToken(dynamic authToken) async {
+    if (authToken is! String || authToken.isEmpty) {
+      return;
+    }
+
+    try {
+      await StoreHelper.storeCookie(
+        authToken,
+        baseUrl: widget.baseUrl,
+        websiteToken: widget.websiteToken,
+        userIdentifier: widget.userIdentifier,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Chatwoot cookie save failed: $error\n$stackTrace');
+    }
   }
 }
